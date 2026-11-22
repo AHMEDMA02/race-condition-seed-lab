@@ -1,0 +1,225 @@
+---
+# ===========================================================================
+# STEP 0 (done first, deliberately): make sure "seed" has NO sudo rights at
+# all -- not a restricted whitelist, none. Some base images (including
+# SEED-Ubuntu-style images) ship their default user already in the "sudo"
+# group and/or with a sudoers.d grant, because the *original*, single-user
+# SEED lab assumes the student has full sudo. On a shared, flag-graded
+# platform that assumption is dangerous: the only privilege a student should
+# ever be able to reach is the one earned by actually exploiting vulp in
+# Level 4. Everything else privileged in this lab (restoring /etc/passwd,
+# toggling a kernel setting, building the Level-5 countermeasure binary) is
+# therefore done either by a narrowly-scoped setuid-root helper with no
+# attacker-controlled input, or by a root-owned background job -- never by
+# handing "seed" sudo.
+# ===========================================================================
+- name: Strip any supplementary group membership from seed (incl. "sudo")
+  user:
+    name: seed
+    groups: ''
+    append: no
+  ignore_errors: yes
+
+- name: Remove any sudoers.d file lines granting "seed" anything
+  shell: |
+    set -e
+    for f in /etc/sudoers.d/*; do
+      [ -f "$f" ] || continue
+      if grep -qE '^[[:space:]]*seed[[:space:]]' "$f" 2>/dev/null; then
+        sed -i '/^[[:space:]]*seed[[:space:]]/d' "$f"
+      fi
+    done
+    visudo -c
+  args:
+    executable: /bin/bash
+  changed_when: false
+
+- name: Remove any direct "seed" grant inside /etc/sudoers itself
+  lineinfile:
+    path: /etc/sudoers
+    regexp: '^seed\s'
+    state: absent
+  register: sudoers_direct_edit
+
+- name: Validate /etc/sudoers after edits
+  command: visudo -c
+  when: sudoers_direct_edit.changed
+
+- name: Adding aliases
+  loop: "{{ aliases | dict2items }}"
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ item.value }} {{ item.key }}"
+
+- name: Install build tools needed to compile the lab program
+  apt:
+    name:
+      - build-essential
+      - gcc
+    state: present
+    update_cache: yes
+
+# --- student working directory -------------------------------------------
+- name: Create student lab directory
+  file:
+    path: /home/seed/lab
+    state: directory
+    owner: seed
+    group: seed
+    mode: '0755'
+
+- name: Deploy vulnerable program source (vulp.c)
+  copy:
+    src: vulp.c
+    dest: /home/seed/lab/vulp.c
+    owner: seed
+    group: seed
+    mode: '0644'
+
+- name: Deploy seteuid countermeasure skeleton
+  copy:
+    src: vulp_seteuid_skeleton.c
+    dest: /home/seed/lab/vulp_seteuid.c
+    owner: seed
+    group: seed
+    mode: '0644'
+
+# vulp itself is built and rooted HERE, by Ansible -- never by the student.
+# If the student were allowed to chown/chmod a binary they compiled
+# themselves, they could put arbitrary code (e.g. a shell) in it instead of
+# the real vulp.c and get an instant root shell with no race condition at
+# all. Level 2 is "inspect this binary", not "create it".
+- name: Compile the official vulp binary
+  command: gcc -o /home/seed/lab/vulp /home/seed/lab/vulp.c
+  args:
+    creates: /home/seed/lab/vulp
+
+- name: Make the official vulp binary Set-UID root
+  file:
+    path: /home/seed/lab/vulp
+    owner: root
+    group: root
+    mode: '4755'
+
+# --- restricted admin tooling ----------------------------------------------
+- name: Create /opt/race-lab
+  file:
+    path: "{{ lab_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Take a clean baseline backup of /etc/passwd (pristine, pre-student state)
+  copy:
+    src: /etc/passwd
+    dest: "{{ lab_dir }}/passwd.bak"
+    remote_src: yes
+    owner: root
+    group: root
+    mode: '0644'
+
+# --- two narrowly-scoped setuid-root helpers --------------------------------
+# Both are plain C binaries with ZERO attacker-controlled input (no argv, no
+# shelling out, no environment dependence): one hardcoded action each. This
+# is the SAME Set-UID mechanism the lab is teaching about, used safely,
+# because nothing about their behaviour can be redirected by the caller.
+- name: Deploy race-lab-reset source
+  copy:
+    src: race_lab_reset.c
+    dest: "{{ lab_dir }}/race_lab_reset.c"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Compile race-lab-reset
+  command: gcc -O2 -o /usr/local/bin/race-lab-reset {{ lab_dir }}/race_lab_reset.c
+  args:
+    creates: /usr/local/bin/race-lab-reset
+
+- name: Make race-lab-reset Set-UID root, runnable by anyone (no args, no shell-out)
+  file:
+    path: /usr/local/bin/race-lab-reset
+    owner: root
+    group: root
+    mode: '4711'
+
+- name: Deploy race-lab-protect-on source
+  copy:
+    src: race_lab_protect_on.c
+    dest: "{{ lab_dir }}/race_lab_protect_on.c"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Compile race-lab-protect-on
+  command: gcc -O2 -o /usr/local/bin/race-lab-protect-on {{ lab_dir }}/race_lab_protect_on.c
+  args:
+    creates: /usr/local/bin/race-lab-protect-on
+
+- name: Make race-lab-protect-on Set-UID root, runnable by anyone (no args, no shell-out)
+  file:
+    path: /usr/local/bin/race-lab-protect-on
+    owner: root
+    group: root
+    mode: '4711'
+
+# --- Level 5 watcher: root-only background job, gated behind Level 4 -------
+# This is a systemd timer running compile_fixed.sh as root every 10s. The
+# script itself refuses to do anything until /etc/passwd differs from the
+# pristine backup above -- which can only happen via a successful Level 4
+# exploit, since /etc/passwd is 0644 root:root and seed has no sudo. This is
+# what stops a student from using the Level 5 "edit a file, get a Set-UID
+# binary back" mechanic as a shortcut to root before actually doing Level 4.
+- name: Deploy the gated auto-compile script (root-only, not setuid)
+  copy:
+    src: compile_fixed.sh
+    dest: "{{ lab_dir }}/compile_fixed.sh"
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Install the systemd service for the watcher
+  copy:
+    src: race-lab-compile-fixed.service
+    dest: /etc/systemd/system/race-lab-compile-fixed.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install the systemd timer for the watcher
+  copy:
+    src: race-lab-compile-fixed.timer
+    dest: /etc/systemd/system/race-lab-compile-fixed.timer
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable and start the watcher timer
+  systemd:
+    name: race-lab-compile-fixed.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+
+# --- disable Ubuntu's sticky-symlink protection for the attack levels ----
+# (Levels 1-5 need this off, as in the original lab's "Initial Setup".
+#  Students turn it back ON themselves in Level 6, via race-lab-protect-on.)
+- name: Disable protected_symlinks for the attack levels (runtime)
+  sysctl:
+    name: fs.protected_symlinks
+    value: '0'
+    sysctl_set: yes
+    state: present
+    reload: yes
+
+# --- per-sandbox secret flag (APG variant answer, see variables.yml) -------
+# Level 4 is the ONLY level gated behind real root, and real root is ONLY
+# reachable through the actual exploit.
+- name: Write Level 4 exploit-success flag (root-only readable)
+  copy:
+    content: "RACE{{ '{' }}{{ flag2_secret }}{{ '}' }}\n"
+    dest: /root/proof_task2.txt
+    owner: root
+    group: root
+    mode: '0600'

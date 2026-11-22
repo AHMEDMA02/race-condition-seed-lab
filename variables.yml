@@ -1,0 +1,23 @@
+# APG variables (CyberRangeCZ "variant answers")
+#
+# This value is generated at random for EACH sandbox instance when the
+# pool is allocated. It is:
+#   1. injected into the Ansible provisioning run (available as a
+#      normal Ansible var, "{{ flag2_secret }}"), and
+#   2. stored by the platform as the expected answer for the training
+#      level whose "answer_variable_name" matches ("variant_answers":
+#      true on that level).
+#
+# Only ONE variable is needed: Level 4 (the real race-condition
+# exploit) is the only level in this scenario that is gated behind
+# genuine root access. The "seed" account has NO sudo rights at all
+# (stripped explicitly at provisioning time), so real root is only
+# reachable by actually performing that exploit -- see
+# race_lab_reset.c, race_lab_protect_on.c, and compile_fixed.sh for
+# how every other path to root was deliberately closed off.
+#
+# See: https://docs.crp.kypo.muni.cz/user-guide-advanced/sandboxes/apg-variables/
+
+flag2_secret:
+  type: text
+  # used for Level 4 (automated race-condition exploit against vulp)

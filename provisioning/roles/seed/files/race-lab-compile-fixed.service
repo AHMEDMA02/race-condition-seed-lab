@@ -1,0 +1,6 @@
+[Unit]
+Description=Race-condition lab: compile vulp_fixed once Level 4 is solved (gated, see compile_fixed.sh)
+
+[Service]
+Type=oneshot
+ExecStart=/opt/race-lab/compile_fixed.sh

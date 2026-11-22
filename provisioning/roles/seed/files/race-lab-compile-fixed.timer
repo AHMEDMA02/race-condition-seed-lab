@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll for Level 5 (vulp_seteuid.c) changes every 10 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
