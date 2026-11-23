@@ -191,7 +191,7 @@
       ],
       "mitre_techniques": [
         {
-          "Exploitation for Privilege Escalation": "T1068"
+          "technique_key": "T1068"
         }
       ],
       "expected_commands": [],
