@@ -3,7 +3,7 @@
 # This value is generated at random for EACH sandbox instance when the
 # pool is allocated. It is:
 #   1. injected into the Ansible provisioning run (available as a
-#      normal Ansible var, "{{ flag2_secret }}"), and
+#      normal Ansible var, "{{ task4_flag }}"), and
 #   2. stored by the platform as the expected answer for the training
 #      level whose "answer_variable_name" matches ("variant_answers":
 #      true on that level).
@@ -18,6 +18,7 @@
 #
 # See: https://docs.crp.kypo.muni.cz/user-guide-advanced/sandboxes/apg-variables/
 
-flag2_secret:
+task4_flag:
   type: text
+  length: 12
   # used for Level 4 (automated race-condition exploit against vulp)

@@ -218,7 +218,7 @@
 # reachable through the actual exploit.
 - name: Write Level 4 exploit-success flag (root-only readable)
   copy:
-    content: "RACE{{ '{' }}{{ flag2_secret }}{{ '}' }}\n"
+    content: "RACE{{ '{' }}{{ task4_flag }}{{ '}' }}\n"
     dest: /root/proof_task2.txt
     owner: root
     group: root

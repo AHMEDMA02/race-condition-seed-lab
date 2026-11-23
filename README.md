@@ -103,7 +103,7 @@ name/tag, update `topology.yml` accordingly.
 ├── ATTRIBUTION.txt
 ├── LICENSE
 ├── topology.yml
-├── variables.yml            # APG variant-answer definition (flag2_secret)
+├── variables.yml            # APG variant-answer definition (task4_flag)
 ├── training.json            # CyberRangeCZ training definition (7 levels, 20 points total)
 └── provisioning/
     ├── playbook.yml
